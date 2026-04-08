@@ -29,6 +29,9 @@ import asyncio
 import logging
 import os
 import time
+from dotenv import load_dotenv
+
+load_dotenv()  # loads otel_agent/.env
 
 # Silence "OPENAI_API_KEY is not set, skipping trace export" from the agents SDK.
 # We use Groq, so the key is never sent anywhere — this is a dummy placeholder.
@@ -71,7 +74,7 @@ from agents import trace as agents_trace   # alias avoids collision with opentel
 from agents.mcp import MCPServerStreamableHttp
 
 client = AsyncOpenAI(
-    api_key="REDACTED_GROQ_API_KEY",
+    api_key=os.environ["API_KEY"],
     base_url="https://api.groq.com/openai/v1/",
 )
 model = OpenAIChatCompletionsModel(

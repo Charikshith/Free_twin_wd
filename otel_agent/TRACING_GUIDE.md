@@ -230,6 +230,153 @@ mcp-service  my_tool_operation      ← same trace_id as above ✅
 
 ---
 
+---
+
+## Part 3 — Multi-Agent Tracing
+
+The same approach scales to multi-agent systems. The key rule is:
+> **Whoever starts a span owns the context. Whoever receives a call must extract it.**
+
+---
+
+### Scenario A: Same-process handoffs (OpenAI Agents SDK)
+
+If agents hand off to each other inside the same process, **no extra work needed**.
+`OpenAIAgentsInstrumentor` automatically creates child spans for every handoff.
+
+```python
+# Both agents in the same process
+orchestrator = Agent(name="Orchestrator", handoffs=[math_agent, search_agent])
+writer_agent = Agent(name="Writer")
+
+async def run():
+    with tracer.start_as_current_span("multi-agent-session"):
+        with agents_trace(workflow_name="multi-agent-session"):
+            result = await Runner.run(orchestrator, input="...")
+```
+
+```
+multi-agent-session
+  └─ Orchestrator              ← auto
+     ├─ generation
+     ├─ handoff → MathAgent    ← auto (handoff span)
+     │  └─ MathAgent
+     │     ├─ generation
+     │     └─ tool call
+     └─ handoff → Writer       ← auto (handoff span)
+        └─ Writer
+           └─ generation
+```
+
+---
+
+### Scenario B: HTTP agent-to-agent (separate processes/services)
+
+Each agent is a separate service. The **calling agent** injects, the **receiving agent** extracts.
+
+**Calling agent** (already done if you followed Part 1):
+```python
+HTTPXClientInstrumentor().instrument()  # injects traceparent into all outgoing httpx calls
+```
+
+**Receiving agent** — extract context at the entry point of its request handler:
+```python
+from opentelemetry.propagate import extract as otel_extract
+from fastapi import Request   # or Flask, Starlette, etc.
+
+@app.post("/run")
+async def run_agent(request: Request):
+    # Extract traceparent from incoming HTTP headers
+    parent_ctx = otel_extract(dict(request.headers))
+
+    with tracer.start_as_current_span("sub-agent-run", context=parent_ctx) as span:
+        span.set_attribute("agent.input", ...)
+        result = await Runner.run(my_agent, input=...)
+        return result
+```
+
+```
+orchestrator-agent (trace_id: abc)
+  └─ agent-run
+     └─ httpx POST → sub-agent  ← HTTPXClientInstrumentor injects traceparent
+        └─ sub-agent-run        ← same trace_id: abc ✅
+           ├─ generation
+           └─ tool call
+```
+
+---
+
+### Scenario C: Parallel agents (fan-out)
+
+Run multiple agents concurrently — all as children of the same parent span.
+
+```python
+import asyncio
+from opentelemetry.context import attach, detach, get_current
+
+async def run_parallel_agents(questions: list[str]):
+    with tracer.start_as_current_span("parallel-session") as parent:
+        # Capture context BEFORE spawning tasks
+        ctx = get_current()
+
+        async def run_one(question: str):
+            token = attach(ctx)   # attach parent context to this coroutine
+            try:
+                with tracer.start_as_current_span(f"agent-run") as span:
+                    span.set_attribute("agent.input", question)
+                    return await Runner.run(agent, input=question)
+            finally:
+                detach(token)
+
+        results = await asyncio.gather(*[run_one(q) for q in questions])
+    return results
+```
+
+```
+parallel-session
+  ├─ agent-run (question 1)    ← same trace_id ✅
+  │  └─ generation
+  ├─ agent-run (question 2)    ← same trace_id ✅
+  │  └─ generation
+  └─ agent-run (question 3)    ← same trace_id ✅
+     └─ generation
+```
+
+---
+
+### Scenario D: Agent calling another Agent's MCP tools
+
+This is exactly what we built — already works. Each agent's MCP servers follow Part 2.
+The orchestrator's `traceparent` flows through:
+```
+Orchestrator → HTTPXClientInstrumentor → MCP Server A → _get_parent_ctx(ctx) → linked ✅
+Orchestrator → HTTPXClientInstrumentor → MCP Server B → _get_parent_ctx(ctx) → linked ✅
+```
+
+---
+
+### Multi-agent `init_otel` checklist
+
+Each agent/service gets its own `init_otel()` call with a **unique service name**:
+
+```python
+# orchestrator.py
+trace_provider, _ = init_otel("orchestrator-agent")
+
+# math_agent.py
+trace_provider, _ = init_otel("math-agent")
+
+# search_agent.py
+trace_provider, _ = init_otel("search-agent")
+
+# shared_mcp_tool.py
+trace_provider, _ = init_otel("shared-mcp-server", filter_libraries=["fastmcp"])
+```
+
+In Grafana you'll see each service name in the **Service** column, all sharing the same `trace_id`.
+
+---
+
 ## Common mistakes
 
 | Mistake | Fix |
@@ -240,3 +387,6 @@ mcp-service  my_tool_operation      ← same trace_id as above ✅
 | Forgot `context=parent_ctx` in `start_as_current_span` | Span starts a new root trace instead of linking |
 | MCP setup (`async with`) outside any span | Connection calls appear as root traces in Grafana |
 | Forgot `force_flush()` before exit | Last batch of spans never reaches Tempo |
+| Same service name across all agents | Can't tell which agent a span came from in Grafana |
+| Spawning `asyncio.gather` tasks without `attach(ctx)` | Parallel agents create separate traces instead of siblings |
+| HTTP receiving agent missing `otel_extract(headers)` | Sub-agent starts a new trace, breaks the chain |
