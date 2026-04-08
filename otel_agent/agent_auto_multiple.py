@@ -60,10 +60,34 @@ logger = logging.getLogger(__name__)
 
 # ── 2. Auto-instrumentation ───────────────────────────────────────────────────
 from openinference.instrumentation.openai_agents import OpenAIAgentsInstrumentor
-from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
 
 OpenAIAgentsInstrumentor().instrument()
-HTTPXClientInstrumentor().instrument()
+
+# Inject traceparent into ALL outgoing httpx requests so MCP servers
+# receive the correct trace_id.
+#
+# Why a module-level variable instead of contextvars?
+# The MCP client's httpx calls run in a background asyncio task created
+# during `async with add_sub_server`.  That task copies the OTel context
+# at creation time — it never sees per-question spans created later.
+# A plain module-level variable is always read fresh, so the monkey-patch
+# picks up whatever trace context we set before each Runner.run() call.
+import httpx
+from opentelemetry import context as otel_context
+from opentelemetry.propagate import inject as otel_inject
+
+_mcp_trace_context = None          # set in run_multi_agent() before each run
+
+_original_send = httpx.AsyncClient.send
+
+async def _send_with_trace(self, request, **kwargs):
+    carrier = {}
+    otel_inject(carrier, context=_mcp_trace_context)
+    for k, v in carrier.items():
+        request.headers[k] = v
+    return await _original_send(self, request, **kwargs)
+
+httpx.AsyncClient.send = _send_with_trace
 
 # ── 3. Metrics ────────────────────────────────────────────────────────────────
 session_counter = meter.create_counter(
@@ -78,9 +102,19 @@ session_duration = meter.create_histogram(
 )
 
 # ── 4. LLM client ─────────────────────────────────────────────────────────────
-from agents import AsyncOpenAI, OpenAIChatCompletionsModel, Agent, Runner
+from pydantic import BaseModel
+from agents import AsyncOpenAI, OpenAIChatCompletionsModel, Agent, Runner, handoff
 from agents import trace as agents_trace
 from agents.mcp import MCPServerStreamableHttp
+
+
+class HandoffReason(BaseModel):
+    """Reason the orchestrator is handing off to a specialist."""
+    reason: str
+
+
+def on_handoff(ctx, input: HandoffReason) -> None:
+    logger.info(f"[Handoff] reason='{input.reason}'")
 
 client = AsyncOpenAI(
     api_key=os.environ["API_KEY"],
@@ -130,6 +164,9 @@ solver_agent = Agent(
 )
 
 # Orchestrator: routes to the right specialist via handoff
+# handoff() with input_type=HandoffReason generates a valid JSON schema
+# (properties: {reason: ...}) that Groq accepts — bare agent handoffs produce
+# an empty schema ("required" with no "properties") which Groq rejects.
 orchestrator = Agent(
     name="OrchestratorAgent",
     instructions=(
@@ -137,10 +174,14 @@ orchestrator = Agent(
         "Given a math question, hand off to the correct specialist:\n"
         "  - AddSubAgent  → simple addition or subtraction only\n"
         "  - SolverAgent  → complex expressions with *, /, ** or parentheses\n"
+        "Always include a brief reason when handing off. "
         "Never calculate yourself — always hand off."
     ),
     model=model,
-    handoffs=[add_sub_agent, solver_agent],
+    handoffs=[
+        handoff(add_sub_agent, on_handoff=on_handoff, input_type=HandoffReason),
+        handoff(solver_agent,  on_handoff=on_handoff, input_type=HandoffReason),
+    ],
 )
 
 # ── 7. Runner ─────────────────────────────────────────────────────────────────
@@ -151,12 +192,17 @@ async def run_multi_agent(user_message: str) -> str:
     All handoffs, LLM calls, and MCP tool calls appear as children
     of the 'multi-agent-run' span — same trace_id throughout.
     """
+    global _mcp_trace_context
     start = time.perf_counter()
 
     with tracer.start_as_current_span("multi-agent-run") as span:
         span.set_attribute("workflow.name", "multi-agent-calculator")
         span.set_attribute("agent.input", user_message)
         span.set_attribute("orchestrator", "OrchestratorAgent")
+
+        # Capture this span's context so the httpx monkey-patch can inject
+        # the correct traceparent into MCP calls (see comment in section 2).
+        _mcp_trace_context = otel_context.get_current()
 
         logger.info(f"[Orchestrator] Starting: {user_message}")
 
@@ -183,23 +229,20 @@ async def run_multi_agent(user_message: str) -> str:
 # ── 8. Entry point ────────────────────────────────────────────────────────────
 async def main():
     questions = [
-        "What is 42 + 58?",                      # → AddSubAgent → add tool
+        # "What is 42 + 58?",                      # → AddSubAgent → add tool
         "What is 100 - 37?",                      # → AddSubAgent → subtract tool
         "Solve step by step: (3 + 5) * 2 - 4 / 2",  # → SolverAgent → solve_steps tool
     ]
 
-    with tracer.start_as_current_span("multi-agent-session") as session:
-        session.set_attribute("question.count", len(questions))
+    async with add_sub_server, mul_div_server:
+        await add_sub_server.list_tools()
+        await mul_div_server.list_tools()
 
-        async with add_sub_server, mul_div_server:
-            await add_sub_server.list_tools()
-            await mul_div_server.list_tools()
-
-            for question in questions:
-                print(f"\n{'─'*60}")
-                print(f"User:  {question}")
-                response = await run_multi_agent(question)
-                print(f"Agent: {response}")
+        for question in questions:
+            print(f"\n{'─'*60}")
+            print(f"User:  {question}")
+            response = await run_multi_agent(question)
+            print(f"Agent: {response}")
 
     trace_provider.force_flush()
     metrics_provider.shutdown()

@@ -31,7 +31,7 @@ sys.path.insert(0, r"D:\Code\AI\Agents\Medium\Agent\Observability\Appraoch_new\F
 
 from otel_agent.otel_setup import init_otel, get_tracer
 from opentelemetry import trace
-from opentelemetry.propagate import extract as otel_extract
+from opentelemetry.trace import SpanContext, TraceFlags, NonRecordingSpan
 
 # Initialize OTel
 _PROMETHEUS_PORT = 8001 if (len(sys.argv) > 1 and sys.argv[1] == "add_sub") else 8002
@@ -48,8 +48,24 @@ def _get_parent_ctx(ctx: Context):
     """Extract W3C trace context (traceparent) from the FastMCP HTTP request headers."""
     try:
         headers = dict(ctx.request_context.request.headers)
-        return otel_extract(headers)
-    except Exception:
+        tp = headers.get("traceparent")
+        if not tp:
+            logger.warning("[TraceCtx] traceparent header MISSING")
+            return None
+
+        # Manually parse: 00-<trace_id>-<span_id>-<flags>
+        parts = tp.split("-")
+        span_context = SpanContext(
+            trace_id=int(parts[1], 16),
+            span_id=int(parts[2], 16),
+            is_remote=True,
+            trace_flags=TraceFlags(int(parts[3], 16)),
+        )
+        parent = NonRecordingSpan(span_context)
+        logger.info(f"[TraceCtx] traceparent={tp} → linked")
+        return trace.set_span_in_context(parent)
+    except Exception as exc:
+        logger.warning(f"[TraceCtx] Failed to extract parent context: {exc}")
         return None
 
 # Setup logging
