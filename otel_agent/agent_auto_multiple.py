@@ -27,7 +27,7 @@ Span hierarchy produced:
                          ├─ langgraph_evaluate_node
                          └─ langgraph_format_node
 
-MCP Servers (start first from Free_twin_wd/):
+MCP Servers (start first from otel_agent/):
     python mcp_tool_instrumented.py add_sub   # → localhost:8081
     python mcp_tool_instrumented.py mul_div   # → localhost:8082
 
@@ -35,8 +35,8 @@ Grafana stack:
     cd grafana_stack && docker compose up -d
     Open: http://localhost:3000
 
-Run:
-    cd otel_agent && python agent_auto_multiple.py
+Run (from otel_agent/):
+    python agent_auto_multiple.py
 """
 
 import asyncio
