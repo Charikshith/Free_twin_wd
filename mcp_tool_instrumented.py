@@ -34,9 +34,12 @@ from opentelemetry import trace
 from opentelemetry.propagate import extract as otel_extract
 
 # Initialize OTel
+_PROMETHEUS_PORT = 8001 if (len(sys.argv) > 1 and sys.argv[1] == "add_sub") else 8002
+
 trace_provider, metrics_provider = init_otel(
     "mcp-calculator-server",
     filter_libraries=["fastmcp"],   # drop FastMCP's own root spans — we emit our own
+    prometheus_port=_PROMETHEUS_PORT,
 )
 tracer = get_tracer(__name__)
 
