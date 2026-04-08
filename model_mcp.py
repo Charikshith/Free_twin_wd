@@ -42,12 +42,16 @@ OpenAIAgentsInstrumentor().instrument()
 # ---------------------------------------------------------------------------
 # 3. Initialize the agent with your custom LLM client
 # ---------------------------------------------------------------------------
+import os
+from dotenv import load_dotenv
 from agents import AsyncOpenAI, OpenAIChatCompletionsModel, Agent, Runner, trace
 from agents.mcp import MCPServerStreamableHttp
 from langfuse import observe
 
+load_dotenv()
 
-client = AsyncOpenAI(api_key="REDACTED_GROQ_API_KEY", base_url="https://api.groq.com/openai/v1/")
+
+client = AsyncOpenAI(api_key=os.environ["API_KEY"], base_url="https://api.groq.com/openai/v1/")
 model = OpenAIChatCompletionsModel(model="openai/gpt-oss-120b", openai_client=client)
 
 

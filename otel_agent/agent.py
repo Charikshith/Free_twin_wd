@@ -19,7 +19,11 @@ Run:
 
 import asyncio
 import logging
+import os
 import time
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # ── 1. OTel bootstrap (MUST happen before agents SDK imports) ─────────────────
 from otel_setup import init_otel, get_tracer, get_meter
@@ -53,7 +57,7 @@ from agents.mcp import MCPServerStreamableHttp
 set_tracing_disabled(True)
 
 client = AsyncOpenAI(
-    api_key="REDACTED_GROQ_API_KEY",
+    api_key=os.environ["API_KEY"],
     base_url="https://api.groq.com/openai/v1/",
 )
 model = OpenAIChatCompletionsModel(
