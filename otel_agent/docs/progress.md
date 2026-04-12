@@ -57,6 +57,57 @@ rate(orchestrator_state_transitions_total[5m]) * 60
 orchestrator_errors_total
 ```
 
+> **Note — KPI 3 shows zero when idle**
+>
+> `rate()` measures the per-second rate of change over the 5-minute window, scaled to per-minute.
+> It returns `0` when no transitions occurred in the last 5 minutes — this is correct behavior.
+>
+> | Time | Value |
+> |------|-------|
+> | Just after running the agent | `~0.4/min` (2 transitions / 300s × 60) |
+> | 5 minutes later with no new runs | `0` — transitions have aged out of the window |
+> | Running repeatedly every minute | `~2.0/min` (2 transitions × 1 run/min) |
+>
+> To always see a non-zero value regardless of activity, use the raw counter:
+> ```promql
+> orchestrator_state_transitions_total        -- total ever, never resets
+> rate(orchestrator_state_transitions_total[1h]) * 60  -- wider window
+> ```
+
+### Expected Values After One Successful Request
+
+For a single request (e.g. `"What is 100 - 37?"`) hitting AddSubAgent:
+
+**KPI 1 — `orchestrator_state_transitions_total`**
+
+Two label combinations, each with value `1`:
+```
+{worker_type="AddSubAgent", from_state="idle",    to_state="running"}   = 1
+{worker_type="AddSubAgent", from_state="running", to_state="completed"} = 1
+```
+One `idle->running` fires in `on_handoff`, one `running->completed` fires after `Runner.run()` returns.
+
+**KPI 2 — `orchestrator_active_workers`**
+
+```
+{worker_type="AddSubAgent"} = 0
+```
++1 on handoff, -1 on completion — net zero by the time Prometheus scrapes. Would show `1` only if queried during the ~1 second the agent is running.
+
+**KPI 3 — `rate(orchestrator_state_transitions_total[5m]) * 60`**
+
+```
+~0.4 transitions/min
+```
+2 transitions in a 5-minute window: `2 / 300s * 60 = 0.4/min`. Run 3 times to see ~1.2/min.
+
+**KPI 4 — `orchestrator_errors_total`**
+
+```
+no data
+```
+OTel counters only appear after their first increment. No errors occurred so the series was never created. This is correct — not a bug. To trigger it, stop an MCP server and send a request.
+
 ---
 
 ## Worker Runner (LangGraph) KPIs

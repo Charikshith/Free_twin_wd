@@ -28,8 +28,8 @@ from fastmcp import FastMCP, Context
 from langgraph.graph import StateGraph, END
 
 from otel_setup import init_otel, get_tracer, get_meter
-from opentelemetry import trace
-from opentelemetry.trace import SpanContext, TraceFlags, NonRecordingSpan
+from opentelemetry import trace, context as otel_context
+from opentelemetry.propagate import extract as otel_extract
 
 # Initialize OTel
 _PROMETHEUS_PORT = 8001 if (len(sys.argv) > 1 and sys.argv[1] == "add_sub") else 8002
@@ -104,21 +104,25 @@ def run_node_with_retry(node_fn, state: dict, max_retries: int = 2) -> dict:
 
 def instrumented_tool(tool_name: str, server_name: str, timeout_s: float = 10.0):
     """Decorator: adds invocation counter, latency histogram, and timeout tracking to MCP tools."""
-    import functools, time as _time
+    import functools, time as _time, threading, contextvars
     def decorator(fn):
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
             start = _time.perf_counter()
             status = "success"
             try:
-                # Timeout enforcement via threading
-                import threading
+                # Copy ALL Python contextvars (Starlette request context + OTel span context)
+                # into the worker thread so ctx.request_context.request.headers is accessible
+                # and _get_parent_ctx can extract the traceparent header correctly.
+                # otel_context.get_current() alone only copies OTel's context; Starlette's
+                # request ContextVar lives in a separate slot and would be lost otherwise.
+                cv_ctx = contextvars.copy_context()
                 result_holder = [None]
                 exc_holder = [None]
 
                 def target():
                     try:
-                        result_holder[0] = fn(*args, **kwargs)
+                        result_holder[0] = cv_ctx.run(fn, *args, **kwargs)
                     except Exception as e:
                         exc_holder[0] = e
 
@@ -151,25 +155,18 @@ def instrumented_tool(tool_name: str, server_name: str, timeout_s: float = 10.0)
 
 
 def _get_parent_ctx(ctx: Context):
-    """Extract W3C trace context (traceparent) from the FastMCP HTTP request headers."""
+    """Extract W3C trace context from FastMCP HTTP request headers using propagate.extract()."""
     try:
         headers = dict(ctx.request_context.request.headers)
         tp = headers.get("traceparent")
         if not tp:
-            logger.warning("[TraceCtx] traceparent header MISSING")
+            logger.warning("[TraceCtx] traceparent header MISSING — span will be a root")
             return None
-
-        # Manually parse: 00-<trace_id>-<span_id>-<flags>
-        parts = tp.split("-")
-        span_context = SpanContext(
-            trace_id=int(parts[1], 16),
-            span_id=int(parts[2], 16),
-            is_remote=True,
-            trace_flags=TraceFlags(int(parts[3], 16)),
-        )
-        parent = NonRecordingSpan(span_context)
-        logger.info(f"[TraceCtx] traceparent={tp} → linked")
-        return trace.set_span_in_context(parent)
+        # Use the standard OTel propagator instead of manual parsing —
+        # handles all edge cases (flags, tracestate, future formats) correctly.
+        parent_ctx = otel_extract(headers)
+        logger.info(f"[TraceCtx] traceparent={tp} -> linked")
+        return parent_ctx
     except Exception as exc:
         logger.warning(f"[TraceCtx] Failed to extract parent context: {exc}")
         return None
