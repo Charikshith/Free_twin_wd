@@ -158,6 +158,40 @@ histogram_quantile(0.95, rate(langgraph_execution_duration_bucket[5m]))
 rate(langgraph_step_retries_total[5m])
 ```
 
+### Expected Values After One Successful Request
+
+For a single request that triggers `solve_steps` (e.g., "Solve step by step: (3 + 5) * 2 - 4 / 2"):
+
+**KPI 1 — `langgraph_build_duration`**
+
+```
+~0.002s (2 milliseconds)
+```
+This fires once at module load when the StateGraph is compiled, not per request. Shows in Prometheus only once when the server starts.
+
+**KPI 2 — `langgraph_step_total`**
+
+```
+{node="parse_node", status="success"} = 1
+{node="evaluate_node", status="success"} = 1
+{node="format_node", status="success"} = 1
+```
+All three nodes execute in order (parse → evaluate → format) and succeed. Each increments its own counter.
+
+**KPI 3 — `langgraph_execution_duration`**
+
+```
+~0.005s (5 milliseconds)
+```
+Total time for the full graph run (all 3 nodes). Typically very fast for simple math expressions.
+
+**KPI 4 — `langgraph_step_retries_total`**
+
+```
+no data
+```
+No retries occurred — all nodes succeeded on first attempt. This metric only appears if a node fails and is retried via `run_node_with_retry()`.
+
 ---
 
 ## MCP Tool Server KPIs
@@ -205,6 +239,34 @@ histogram_quantile(0.95, rate(mcp_tool_duration_bucket[5m]))
 # Timeout rate
 rate(mcp_tool_timeouts_total[5m])
 ```
+
+### Expected Values After One Successful Request
+
+For a single request that hits both servers (e.g., "What is 100 - 33?"):
+
+**KPI 1 — `mcp_tool_invocations_total`**
+
+```
+{tool="subtract", tool_server="add_sub_server", status="success"} = 1
+```
+One invocation of the `subtract` tool, which succeeded. If the request used `solve_steps` instead, you'd see:
+```
+{tool="solve_steps", tool_server="mul_div_server", status="success"} = 1
+```
+
+**KPI 2 — `mcp_tool_duration`**
+
+```
+~0.001s to 0.005s (1-5 milliseconds)
+```
+Latency histogram for the tool call, measured wall-clock time inside the `@instrumented_tool` decorator (includes thread spawn overhead and the actual computation). Run multiple times to populate histogram buckets.
+
+**KPI 3 — `mcp_tool_timeouts_total`**
+
+```
+no data
+```
+No timeouts occurred — all tools completed within the 10-second timeout window. This metric only appears after an increment (i.e., when a tool call times out).
 
 ---
 
