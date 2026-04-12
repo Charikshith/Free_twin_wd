@@ -208,6 +208,56 @@ rate(mcp_tool_timeouts_total[5m])
 
 ---
 
+## Logs in Loki
+
+All application logs are automatically shipped to Loki with trace/span context injected.
+
+### What Gets Logged
+
+**From `agent_auto_multiple.py`:**
+```
+[Handoff] AddSubAgent: idle->running, reason='...'
+[Transition] AddSubAgent: running->completed
+[Sync] Status synced to API
+```
+
+**From `mcp_tool_instrumented.py`:**
+```
+add(a, b) = result
+solve_steps('...') completed in 0.123s
+[LangGraph] Parse: '...' -> N tokens
+[LangGraph] Evaluate: '...' = result
+[TraceCtx] traceparent=... -> linked
+```
+
+### How to View Logs in Grafana
+
+1. Go to **Explore** (left sidebar)
+2. Select **Loki** from the data source dropdown
+3. Use LogQL queries:
+
+```logql
+# All logs from the agent service
+{service="multi-agent-calculator"}
+
+# Logs from a specific trace (copy Trace ID from Tempo)
+{service="multi-agent-calculator"} | json trace_id="6b819b37a6c15cbc..."
+
+# Only errors
+{service="multi-agent-calculator"} | level="error"
+
+# Handoff events
+{service="multi-agent-calculator"} | "Handoff"
+```
+
+### Linking Logs to Traces
+
+Every log record includes `otelTraceID` and `otelSpanID` injected by `LoggingInstrumentor`.
+When you click a log line in Loki, the details panel shows the trace ID — click it to jump directly to that trace in Tempo.
+Logs and traces are linked by both trace ID and span ID for full observability.
+
+---
+
 ## Prometheus Scrape Config
 
 ```yaml
