@@ -12,6 +12,7 @@ Usage:
 """
 
 import logging
+import logging_loki
 from typing import Sequence
 from opentelemetry import trace, metrics
 from opentelemetry.sdk.trace import TracerProvider, ReadableSpan
@@ -74,6 +75,7 @@ def init_otel(
     otlp_endpoint: str = "localhost:4317",
     prometheus_port: int = 8000,
     filter_libraries: list[str] | None = None,
+    loki_url: str = "http://localhost:3100/loki/api/v1/push",
 ) -> tuple:
     """
     Initialize OpenTelemetry with OTLP gRPC exporters for traces and Prometheus for metrics.
@@ -110,16 +112,26 @@ def init_otel(
     metrics_provider = MeterProvider(resource=resource, metric_readers=[metric_reader])
     metrics.set_meter_provider(metrics_provider)
 
-    # ── Logs ──────────────────────────────────────────────────────────────────
-    # set_logging_format=True lets the instrumentor inject otelTraceID/otelSpanID
-    # into every record safely — it handles records emitted outside a span (where
-    # those fields don't exist yet) without crashing.
+    # ── Logs → Loki (via python-logging-loki) ────────────────────────────────
+    # LoggingInstrumentor injects otelTraceID/otelSpanID into every record.
+    # LokiHandler pushes each record directly to Loki over HTTP — no file or
+    # Alloy relay needed. Tags are indexed label in Loki; trace_id is added as
+    # a structured field so Grafana can link log lines to Tempo traces.
     logging.basicConfig(level=logging.INFO)
     LoggingInstrumentor().instrument(set_logging_format=True)
 
-    # ── Startup banner (replaces langfuse.auth_check()) ───────────────────────
+    loki_handler = logging_loki.LokiHandler(
+        url=loki_url,
+        tags={"service": service_name, "env": "local"},
+        version="1",
+    )
+    loki_handler.setLevel(logging.INFO)
+    logging.getLogger().addHandler(loki_handler)
+
+    # ── Startup banner ────────────────────────────────────────────────────────
     print(f"[OTel] TracerProvider  initialized -> grpc://{otlp_endpoint} (Tempo)")
     print(f"[OTel] MeterProvider   initialized -> http://localhost:{prometheus_port}/metrics (Prometheus)")
+    print(f"[OTel] LokiHandler     active      -> {loki_url} (Loki)")
     print(f"[OTel] LoggingInstrumentor active  -> trace_id/span_id injected into all log records")
     print(f"[OTel] Service: {service_name} v1.0.0 ready")
 

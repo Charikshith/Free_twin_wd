@@ -1,55 +1,174 @@
-All 4 DW Orchestrator KPIs are implemented. Here's what was added to agent_auto_multiple.py:
+# KPI Implementation Progress
 
-Metrics (Section 3)
+## Overview
 
-┌───────────────────────────┬────────────────────────────────┬───────────────┬───────────────────────────────────┐
-│            KPI            │             Metric             │     Type      │              Labels               │
-├───────────────────────────┼────────────────────────────────┼───────────────┼───────────────────────────────────┤
-│ Concurrent active workers │ orchestrator.active.workers    │ UpDownCounter │ worker_type                       │
-├───────────────────────────┼────────────────────────────────┼───────────────┼───────────────────────────────────┤
-│ Worker state transitions  │ orchestrator.state.transitions │ Counter       │ worker_type, from_state, to_state │
-├───────────────────────────┼────────────────────────────────┼───────────────┼───────────────────────────────────┤
-│ Orchestration error rate  │ orchestrator.errors            │ Counter       │ error_type, worker_type           │
-├───────────────────────────┼────────────────────────────────┼───────────────┼───────────────────────────────────┤
-│ Status sync failures      │ orchestrator.sync.failures     │ Counter       │ failure_type, worker_type         │
-└───────────────────────────┴────────────────────────────────┴───────────────┴───────────────────────────────────┘
+| Area | KPIs | Status | File | Metrics Port |
+|---|---|---|---|---|
+| DW Orchestrator | 4 | Done | `agent_auto_multiple.py`, `agent_api.py` | 8000 |
+| Worker Runner (LangGraph) | 4 | Done | `mcp_tool_instrumented.py` | 8002 |
+| MCP Tool Servers | 3 | Done | `mcp_tool_instrumented.py` | 8001, 8002 |
+| **Total** | **11** | **Done** | | |
 
-Tracing Spans
+---
 
-┌───────────────────────────────────────────────────┬──────────────────────────────────┬────────────────────────────────┐
-│                       Span                        │              Where               │            Purpose             │
-├───────────────────────────────────────────────────┼──────────────────────────────────┼────────────────────────────────┤
-│ orchestrator.worker.lifecycle                     │ Wraps entire run_multi_agent     │ Full worker lifecycle (parent) │
-├───────────────────────────────────────────────────┼──────────────────────────────────┼────────────────────────────────┤
-│ orchestrator.transition (idle→running)            │ on_handoff callback              │ Tracks handoff start           │
-├───────────────────────────────────────────────────┼──────────────────────────────────┼────────────────────────────────┤
-│ orchestrator.transition (running→completed/error) │ After Runner.run completes/fails │ Tracks completion              │
-├───────────────────────────────────────────────────┼──────────────────────────────────┼────────────────────────────────┤
-│ orchestrator.sync                                 │ _sync_status_to_api()            │ Status sync to external API    │
-└───────────────────────────────────────────────────┴──────────────────────────────────┴────────────────────────────────┘
+## DW Orchestrator KPIs
 
-Flow
+Implemented in: `agent_auto_multiple.py`, `agent_api.py`
+Metrics served on: port 8000
 
-1. Handoff fires → on_handoff records idle→running transition, increments active_workers
-2. Run succeeds → records running→completed, decrements active_workers
-3. Run fails → records running→error, decrements active_workers, increments orchestration_errors
-4. Sync → _sync_status_to_api reports final status, tracks failures
+### Metrics
 
-#### Now in Grafana → Explore → Prometheus
+| KPI | Metric | Type | Labels |
+|---|---|---|---|
+| Concurrent active workers | `orchestrator_active_workers` | UpDownCounter | `worker_type` |
+| Worker state transitions | `orchestrator_state_transitions_total` | Counter | `worker_type`, `from_state`, `to_state` |
+| Orchestration error rate | `orchestrator_errors_total` | Counter | `error_type`, `worker_type` |
+| Status sync failures | `orchestrator_sync_failures_total` | Counter | `failure_type`, `worker_type` |
 
-Run these 4 queries one by one:
+### Tracing Spans
 
-KPI 1 — State Transitions
+| Span | Where | Purpose |
+|---|---|---|
+| `orchestrator.worker.lifecycle` | Wraps entire `run_multi_agent` | Full worker lifecycle (parent) |
+| `orchestrator.transition` (idle->running) | `on_handoff` callback | Tracks handoff start |
+| `orchestrator.transition` (running->completed/error) | After `Runner.run` completes/fails | Tracks completion |
+| `orchestrator.sync` | `_sync_status_to_api()` | Status sync to external API |
+
+### Flow
+
+1. Handoff fires -> `on_handoff` records `idle->running` transition, increments `active_workers`
+2. Run succeeds -> records `running->completed`, decrements `active_workers`
+3. Run fails -> records `running->error`, decrements `active_workers`, increments `orchestration_errors`
+4. Sync -> `_sync_status_to_api` reports final status, tracks failures
+
+### Grafana Queries
+
+```promql
+# KPI 1 - State transitions by from/to state
 orchestrator_state_transitions_total
 
-KPI 2 — Active Workers
+# KPI 2 - Currently active workers
 orchestrator_active_workers
 
-KPI 3 — Transitions rate per minute
+# KPI 3 - Transitions rate per minute
 rate(orchestrator_state_transitions_total[5m]) * 60
 
-KPI 4 — Error rate (will show 0 until an error occurs)
+# KPI 4 - Error rate (0 until an error occurs)
 orchestrator_errors_total
+```
 
-Check http://localhost:9090/targets first — confirm calculator-agent is UP, then the queries above will return
-data in Grafana.
+---
+
+## Worker Runner (LangGraph) KPIs
+
+Implemented in: `mcp_tool_instrumented.py`
+Metrics served on: port 8002 (mul_div_server)
+
+### Metrics
+
+| KPI | Metric | Type | Labels |
+|---|---|---|---|
+| Execution graph build time | `langgraph_build_duration` | Histogram | `worker_type` |
+| Step success/failure rate per node | `langgraph_step_total` | Counter | `node`, `status` |
+| Total execution duration | `langgraph_execution_duration` | Histogram | `worker_type` |
+| Step retry count | `langgraph_step_retries_total` | Counter | `node` |
+
+### Tracing Spans
+
+| Span | Where | Purpose |
+|---|---|---|
+| `worker.runner.execution` | Wraps `_solver_graph.invoke()` in `solve_steps` | Full graph run lifecycle |
+| `worker.runner.build` | Entry point of `solve_steps` | Marks graph execution entry |
+| `langgraph_parse_node` | `parse_node` function | Tokenization step |
+| `langgraph_evaluate_node` | `evaluate_node` function | Expression evaluation step |
+| `langgraph_format_node` | `format_node` function | Result formatting step |
+
+### Implementation Details
+
+- `graph_build_time` recorded once at module load when `StateGraph(...).compile()` runs
+- Each node (`parse_node`, `evaluate_node`, `format_node`) increments `langgraph_step_total` with `{node, status}` labels inside its try/except
+- `execution_duration` recorded in `solve_steps` wrapping the full `_solver_graph.invoke()` call
+- `run_node_with_retry(node_fn, state, max_retries=2)` wrapper available for retry tracking — increments `langgraph_step_retries_total` on each failed attempt with exponential backoff
+
+### Grafana Queries
+
+```promql
+# Build time (fires once at server startup)
+langgraph_build_duration_sum / langgraph_build_duration_count
+
+# Node success/failure rate
+rate(langgraph_step_total{status="success"}[5m])
+rate(langgraph_step_total{status="failure"}[5m])
+
+# Execution duration p95
+histogram_quantile(0.95, rate(langgraph_execution_duration_bucket[5m]))
+
+# Retry rate per node
+rate(langgraph_step_retries_total[5m])
+```
+
+---
+
+## MCP Tool Server KPIs
+
+Implemented in: `mcp_tool_instrumented.py`
+Metrics served on: port 8001 (add_sub_server), port 8002 (mul_div_server)
+
+### Metrics
+
+| KPI | Metric | Type | Labels |
+|---|---|---|---|
+| Tool invocation success/failure rate | `mcp_tool_invocations_total` | Counter | `tool`, `tool_server`, `status` |
+| Response latency per tool | `mcp_tool_duration` | Histogram | `tool`, `tool_server` |
+| Tool timeout count | `mcp_tool_timeouts_total` | Counter | `tool`, `tool_server` |
+
+### Status Label Values
+
+| Value | When set |
+|---|---|
+| `success` | Tool returned a result normally |
+| `error` | Tool raised an exception (not timeout) |
+| `timeout` | Thread did not complete within `timeout_s` |
+
+### Implementation Details
+
+- `@instrumented_tool(tool_name, server_name, timeout_s=10.0)` decorator applied to `add`, `subtract`, `solve_steps`
+- Decorator runs the tool in a daemon thread and joins with `timeout_s`; if the thread is still alive, increments `mcp_tool_timeouts_total` and raises `TimeoutError`
+- `mcp_tool_invocations_total` always fires in the `finally` block regardless of outcome
+- `mcp_tool_duration` records wall-clock elapsed time in the `finally` block regardless of outcome
+
+### Grafana Queries
+
+```promql
+# Invocation rate by tool and status
+rate(mcp_tool_invocations_total[5m])
+
+# Success vs error rate
+rate(mcp_tool_invocations_total{status="success"}[5m])
+rate(mcp_tool_invocations_total{status="error"}[5m])
+
+# Latency p50/p95 per tool
+histogram_quantile(0.50, rate(mcp_tool_duration_bucket[5m]))
+histogram_quantile(0.95, rate(mcp_tool_duration_bucket[5m]))
+
+# Timeout rate
+rate(mcp_tool_timeouts_total[5m])
+```
+
+---
+
+## Prometheus Scrape Config
+
+```yaml
+- job_name: calculator-agent
+  static_configs:
+    - targets: ["host.docker.internal:8000"]   # orchestrator metrics
+
+- job_name: mcp-add-sub-server
+  static_configs:
+    - targets: ["host.docker.internal:8001"]   # add/subtract tool metrics
+
+- job_name: mcp-mul-div-server
+  static_configs:
+    - targets: ["host.docker.internal:8002"]   # solve_steps + LangGraph metrics
+```

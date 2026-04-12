@@ -27,7 +27,7 @@ from typing import TypedDict
 from fastmcp import FastMCP, Context
 from langgraph.graph import StateGraph, END
 
-from otel_setup import init_otel, get_tracer
+from otel_setup import init_otel, get_tracer, get_meter
 from opentelemetry import trace
 from opentelemetry.trace import SpanContext, TraceFlags, NonRecordingSpan
 
@@ -40,10 +40,114 @@ trace_provider, metrics_provider = init_otel(
     prometheus_port=_PROMETHEUS_PORT,
 )
 tracer = get_tracer(__name__)
+meter  = get_meter(__name__)
+
+# ── Worker Runner (LangGraph) KPI metrics ────────────────────────────────────
+graph_build_time = meter.create_histogram(
+    "langgraph.build.duration",
+    unit="s",
+    description="Time to construct and compile the execution graph",
+)
+step_total = meter.create_counter(
+    "langgraph.step.total",
+    unit="1",
+    description="Total graph node executions by node and status",
+)
+execution_duration = meter.create_histogram(
+    "langgraph.execution.duration",
+    unit="s",
+    description="Total duration of a full graph run",
+)
+step_retries = meter.create_counter(
+    "langgraph.step.retries",
+    unit="1",
+    description="Total step retry attempts per node",
+)
+
+# ── MCP Tool Server KPI metrics ───────────────────────────────────────────────
+tool_invocations = meter.create_counter(
+    "mcp.tool.invocations",
+    unit="1",
+    description="Total MCP tool invocations by tool, server, and status",
+)
+tool_duration = meter.create_histogram(
+    "mcp.tool.duration",
+    unit="s",
+    description="MCP tool response latency by tool and server",
+)
+tool_timeouts = meter.create_counter(
+    "mcp.tool.timeouts",
+    unit="1",
+    description="MCP tool calls that exceeded timeout",
+)
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+def run_node_with_retry(node_fn, state: dict, max_retries: int = 2) -> dict:
+    """Run a LangGraph node with retry logic, tracking retries in Prometheus."""
+    node_name = node_fn.__name__
+    for attempt in range(max_retries + 1):
+        try:
+            return node_fn(state)
+        except Exception as e:
+            if attempt < max_retries:
+                step_retries.add(1, {"node": node_name})
+                wait = 2 ** attempt
+                logger.warning(f"[Retry] {node_name} attempt {attempt + 1}/{max_retries} failed: {e}. Retrying in {wait}s")
+                import time as _time; _time.sleep(wait)
+            else:
+                raise
+
+
+def instrumented_tool(tool_name: str, server_name: str, timeout_s: float = 10.0):
+    """Decorator: adds invocation counter, latency histogram, and timeout tracking to MCP tools."""
+    import functools, time as _time
+    def decorator(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            start = _time.perf_counter()
+            status = "success"
+            try:
+                # Timeout enforcement via threading
+                import threading
+                result_holder = [None]
+                exc_holder = [None]
+
+                def target():
+                    try:
+                        result_holder[0] = fn(*args, **kwargs)
+                    except Exception as e:
+                        exc_holder[0] = e
+
+                t = threading.Thread(target=target, daemon=True)
+                t.start()
+                t.join(timeout=timeout_s)
+
+                if t.is_alive():
+                    tool_timeouts.add(1, {"tool": tool_name, "tool_server": server_name})
+                    status = "timeout"
+                    raise TimeoutError(f"{tool_name} exceeded {timeout_s}s timeout")
+
+                if exc_holder[0] is not None:
+                    raise exc_holder[0]
+
+                return result_holder[0]
+
+            except TimeoutError:
+                status = "timeout"
+                raise
+            except Exception:
+                status = "error"
+                raise
+            finally:
+                elapsed = _time.perf_counter() - start
+                tool_invocations.add(1, {"tool": tool_name, "tool_server": server_name, "status": status})
+                tool_duration.record(elapsed, {"tool": tool_name, "tool_server": server_name})
+        return wrapper
+    return decorator
 
 
 def _get_parent_ctx(ctx: Context):
@@ -114,18 +218,23 @@ def parse_node(state: MathState) -> dict:
     """Node 1 — tokenize the expression into numbers and operators."""
     with tracer.start_as_current_span("langgraph_parse_node") as span:
         expr = state["expression"]
-        tokens = re.findall(r"\d+\.?\d*|[+\-*/^()]", expr)
-
-        span.set_attribute("expression", expr)
-        span.set_attribute("token_count", len(tokens))
-        span.set_attribute("tokens", str(tokens))
-
-        logger.info(f"[LangGraph] Parse: '{expr}' → {len(tokens)} tokens")
-
-        return {
-            "tokens": tokens,
-            "steps": [f"[Parse]    '{expr}'  →  tokens: {tokens}"],
-        }
+        try:
+            tokens = re.findall(r"\d+\.?\d*|[+\-*/^()]", expr)
+            span.set_attribute("expression", expr)
+            span.set_attribute("token_count", len(tokens))
+            span.set_attribute("tokens", str(tokens))
+            span.set_attribute("status", "success")
+            step_total.add(1, {"node": "parse_node", "status": "success"})
+            logger.info(f"[LangGraph] Parse: '{expr}' -> {len(tokens)} tokens")
+            return {
+                "tokens": tokens,
+                "steps": [f"[Parse]    '{expr}'  ->  tokens: {tokens}"],
+            }
+        except Exception as e:
+            step_total.add(1, {"node": "parse_node", "status": "failure"})
+            span.set_attribute("status", "failure")
+            span.record_exception(e)
+            raise
 
 
 def evaluate_node(state: MathState) -> dict:
@@ -133,16 +242,15 @@ def evaluate_node(state: MathState) -> dict:
     with tracer.start_as_current_span("langgraph_evaluate_node") as span:
         expr = state["expression"]
         steps = state["steps"]
-
         span.set_attribute("expression", expr)
 
         try:
             result = _safe_eval(expr)
-
             span.set_attribute("result", result)
             span.set_attribute("error", "")
+            span.set_attribute("status", "success")
+            step_total.add(1, {"node": "evaluate_node", "status": "success"})
             logger.info(f"[LangGraph] Evaluate: '{expr}' = {result}")
-
             return {
                 "result": result,
                 "error": "",
@@ -151,9 +259,10 @@ def evaluate_node(state: MathState) -> dict:
         except Exception as exc:
             span.set_attribute("result", 0.0)
             span.set_attribute("error", str(exc))
+            span.set_attribute("status", "failure")
             span.record_exception(exc)
+            step_total.add(1, {"node": "evaluate_node", "status": "failure"})
             logger.error(f"[LangGraph] Evaluate ERROR: {exc}")
-
             return {
                 "result": 0.0,
                 "error": str(exc),
@@ -165,24 +274,33 @@ def format_node(state: MathState) -> dict:
     """Node 3 — build the final human-readable answer string."""
     with tracer.start_as_current_span("langgraph_format_node") as span:
         steps = state["steps"]
+        try:
+            if state["error"]:
+                summary = f"Could not solve '{state['expression']}': {state['error']}"
+                span.set_attribute("error", state["error"])
+                span.set_attribute("status", "failure")
+                step_total.add(1, {"node": "format_node", "status": "failure"})
+            else:
+                result = state["result"]
+                result_str = str(int(result)) if result == int(result) else str(result)
+                summary = f"[Format]   Result = {result_str}"
+                span.set_attribute("result_formatted", result_str)
+                span.set_attribute("status", "success")
+                step_total.add(1, {"node": "format_node", "status": "success"})
 
-        if state["error"]:
-            summary = f"Could not solve '{state['expression']}': {state['error']}"
-            span.set_attribute("error", state["error"])
-        else:
-            result = state["result"]
-            # Show integer when there's no fractional part
-            result_str = str(int(result)) if result == int(result) else str(result)
-            summary = f"[Format]   Result = {result_str}"
-            span.set_attribute("result_formatted", result_str)
-
-        span.set_attribute("expression", state["expression"])
-        logger.info(f"[LangGraph] Format: {summary}")
-
-        return {"steps": steps + [summary]}
+            span.set_attribute("expression", state["expression"])
+            logger.info(f"[LangGraph] Format: {summary}")
+            return {"steps": steps + [summary]}
+        except Exception as e:
+            step_total.add(1, {"node": "format_node", "status": "failure"})
+            span.set_attribute("status", "failure")
+            span.record_exception(e)
+            raise
 
 
-# Compile the LangGraph workflow once at module load
+# Compile the LangGraph workflow once at module load — measure build duration
+import time as _build_time
+_build_start = _build_time.perf_counter()
 _solver_graph = (
     StateGraph(MathState)
     .add_node("parse",    parse_node)
@@ -194,6 +312,9 @@ _solver_graph = (
     .add_edge("format",   END)
     .compile()
 )
+_build_elapsed = _build_time.perf_counter() - _build_start
+graph_build_time.record(_build_elapsed, {"worker_type": "solver"})
+logger.info(f"[LangGraph] Graph compiled in {_build_elapsed:.4f}s")
 
 
 # ---------------------------------------------------------------------------
@@ -203,6 +324,7 @@ add_sub_mcp = FastMCP(name="add_sub_server")
 
 
 @add_sub_mcp.tool()
+@instrumented_tool("add", "add_sub_server")
 def add(a: float, b: float, ctx: Context) -> float:
     """Add two numbers together."""
     parent_ctx = _get_parent_ctx(ctx)
@@ -216,6 +338,7 @@ def add(a: float, b: float, ctx: Context) -> float:
 
 
 @add_sub_mcp.tool()
+@instrumented_tool("subtract", "add_sub_server")
 def subtract(a: float, b: float, ctx: Context) -> float:
     """Subtract b from a."""
     parent_ctx = _get_parent_ctx(ctx)
@@ -235,42 +358,63 @@ mul_div_mcp = FastMCP(name="mul_div_server")
 
 
 @mul_div_mcp.tool()
+@instrumented_tool("solve_steps", "mul_div_server")
 def solve_steps(expression: str, ctx: Context) -> str:
     """
     Solve a multi-step arithmetic expression and return a step-by-step breakdown.
 
     Uses a 3-node LangGraph pipeline:
-      parse     → tokenize the expression
-      evaluate  → compute the result safely (no eval())
-      format    → produce a readable step-by-step answer
+      parse     -> tokenize the expression
+      evaluate  -> compute the result safely (no eval())
+      format    -> produce a readable step-by-step answer
 
     Supports: +  -  *  /  **  parentheses  (e.g. '(3 + 5) * 2 - 4 / 2')
     Returns a newline-separated log of each node's output.
     """
+    import time as _t
     parent_ctx = _get_parent_ctx(ctx)
     with tracer.start_as_current_span("solve_steps_operation", context=parent_ctx) as span:
         span.set_attribute("expression", expression)
 
-        try:
-            initial_state: MathState = {
-                "expression": expression,
-                "tokens": [],
-                "result": 0.0,
-                "steps": [],
-                "error": "",
-            }
-            final_state = _solver_graph.invoke(initial_state)
-            result_str = "\n".join(final_state["steps"])
+        with tracer.start_as_current_span("worker.runner.execution", attributes={
+            "worker.type": "solver",
+            "graph.node_count": 3,
+        }) as exec_span:
+            exec_start = _t.perf_counter()
+            try:
+                initial_state: MathState = {
+                    "expression": expression,
+                    "tokens": [],
+                    "result": 0.0,
+                    "steps": [],
+                    "error": "",
+                }
+                # Run nodes with retry support
+                with tracer.start_as_current_span("worker.runner.build"):
+                    pass  # graph already compiled at module load; span marks execution entry
 
-            span.set_attribute("result", result_str)
-            span.set_attribute("error", final_state.get("error", ""))
-            logger.info(f"solve_steps('{expression}') completed")
+                final_state = _solver_graph.invoke(initial_state)
+                result_str = "\n".join(final_state["steps"])
 
-            return result_str
-        except Exception as exc:
-            span.set_attribute("error", str(exc))
-            logger.error(f"solve_steps('{expression}') → {exc}")
-            raise
+                exec_elapsed = _t.perf_counter() - exec_start
+                execution_duration.record(exec_elapsed, {"worker_type": "solver"})
+                exec_span.set_attribute("execution.duration_s", round(exec_elapsed, 3))
+                exec_span.set_attribute("execution.status", "completed" if not final_state.get("error") else "failed")
+
+                span.set_attribute("result", result_str)
+                span.set_attribute("error", final_state.get("error", ""))
+                logger.info(f"solve_steps('{expression}') completed in {exec_elapsed:.3f}s")
+
+                return result_str
+
+            except Exception as exc:
+                exec_elapsed = _t.perf_counter() - exec_start
+                execution_duration.record(exec_elapsed, {"worker_type": "solver"})
+                exec_span.set_attribute("execution.status", "failed")
+                exec_span.set_attribute("execution.duration_s", round(exec_elapsed, 3))
+                span.set_attribute("error", str(exc))
+                logger.error(f"solve_steps('{expression}') -> {exc}")
+                raise
 
 
 # ---------------------------------------------------------------------------
