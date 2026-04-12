@@ -105,7 +105,7 @@ def init_otel(
 
     # ── Metrics → Prometheus (exposed on prometheus_port) ──────────────────────
     # Start HTTP server that Prometheus scrapes
-    start_http_server(prometheus_port)
+    start_http_server(prometheus_port, addr="0.0.0.0")
     metric_reader = PrometheusMetricReader()
     metrics_provider = MeterProvider(resource=resource, metric_readers=[metric_reader])
     metrics.set_meter_provider(metrics_provider)
@@ -118,9 +118,9 @@ def init_otel(
     LoggingInstrumentor().instrument(set_logging_format=True)
 
     # ── Startup banner (replaces langfuse.auth_check()) ───────────────────────
-    print(f"[OTel] TracerProvider  initialized → grpc://{otlp_endpoint} (Tempo)")
-    print(f"[OTel] MeterProvider   initialized → http://localhost:{prometheus_port}/metrics (Prometheus)")
-    print(f"[OTel] LoggingInstrumentor active  → trace_id/span_id injected into all log records")
+    print(f"[OTel] TracerProvider  initialized -> grpc://{otlp_endpoint} (Tempo)")
+    print(f"[OTel] MeterProvider   initialized -> http://localhost:{prometheus_port}/metrics (Prometheus)")
+    print(f"[OTel] LoggingInstrumentor active  -> trace_id/span_id injected into all log records")
     print(f"[OTel] Service: {service_name} v1.0.0 ready")
 
     return trace_provider, metrics_provider
