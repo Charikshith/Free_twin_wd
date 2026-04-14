@@ -1,0 +1,37 @@
+tempo:
+  storage:
+    trace:
+      backend: local
+      local:
+        path: /var/tempo/traces
+  traces:
+    otlp:
+      grpc:
+        enabled: true
+      http:
+        enabled: true
+    jaeger:
+      grpcThriftBinary:
+        enabled: true
+      thriftHttp:
+        enabled: true
+    zipkin:
+      enabled: true
+  # Generate span-metrics and service-graph metrics and push to Prometheus
+  metricsGenerator:
+    enabled: true
+    remoteWriteUrl: "http://kube-prom-stack-kube-prome-prometheus.monitoring.svc:9090/api/v1/write"
+  global_overrides:
+    metrics_generator_processors:
+      - service-graphs
+      - span-metrics
+
+persistence:
+  enabled: true
+  size: 5Gi
+
+serviceMonitor:
+  enabled: true
+
+tempoQuery:
+  enabled: false    # no need for Jaeger UI, use Grafana instead
