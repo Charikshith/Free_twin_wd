@@ -1,5 +1,9 @@
 adminPassword: "grafana"   # change for production!
 
+# Disable init container that chowns the volume (avoids busybox pull issues)
+initChownData:
+  enabled: false
+
 persistence:
   enabled: true
   size: 2Gi

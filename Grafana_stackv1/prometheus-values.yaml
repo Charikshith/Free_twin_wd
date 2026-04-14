@@ -65,3 +65,16 @@ nodeExporter:
 
 kubeStateMetrics:
   enabled: true
+
+# Docker Desktop binds these to 127.0.0.1 on the node — unreachable by Prometheus pods
+kubeControllerManager:
+  enabled: false
+
+kubeScheduler:
+  enabled: false
+
+kubeEtcd:
+  enabled: false
+
+kubeProxy:
+  enabled: false
