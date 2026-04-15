@@ -5,6 +5,7 @@ __pycache__/
 *.pyd
 *.so
 otel_agentv1.zip
+Grafana_stackv2.zip
 # ── Virtual environments ───────────────────────────────────────────────────────
 .venv/
 venv/
