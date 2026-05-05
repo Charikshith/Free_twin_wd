@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip show *)",
+      "Bash(python -c \"import wd_otel; print\\('wd_otel imported OK'\\)\")",
+      "Bash(python -c \"from fastmcp import Context; print\\('fastmcp.Context imported OK'\\)\")",
+      "Bash(pip install *)",
+      "Bash(python -m pytest tests/test_context.py -v)",
+      "Bash(python -m pytest tests/test_decorator.py -v)",
+      "Bash(python -c \"from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter; print\\('OK'\\)\")",
+      "Bash(python -c \"from opentelemetry.sdk.trace.export import InMemorySpanExporter; print\\('export OK'\\)\")",
+      "Bash(python -m pytest tests/ -v)",
+      "Bash(python -m pytest tests/ -v --tb=short)",
+      "Bash(pytest tests/ -v --tb=short)",
+      "Bash(python -c \"from opentelemetry.sdk.trace.export.in_memory import InMemorySpanExporter; print\\('OK'\\)\")",
+      "Bash(python *)",
+      "Bash(echo \"exit:$?\")",
+      "Bash(echo \"exit_code=$?\")",
+      "Bash(xargs grep *)",
+      "Bash(python3 -c \"import anyio; import inspect; import anyio._backends._asyncio as ab; src = inspect.getsource\\(ab.TaskGroup.start_soon\\); print\\(src\\)\")",
+      "Bash(python3 *)",
+      "PowerShell(Get-NetTCPConnection -State Listen -LocalPort 3200,4317,8080,8081,8082,3003 -ErrorAction SilentlyContinue)",
+      "Bash(curl -s http://localhost:3200/api/search)",
+      "Bash(curl -s -X POST http://localhost:3003/api/run -H \"Content-Type: application/json\" -d '{\"question\":\"what is 7+3\"}' -w \"\\\\nHTTP %{http_code}\\\\n\" --max-time 30)"
+    ]
+  }
+}
